@@ -106,7 +106,7 @@ void ExecCtx::Run(const DebugLocation& location, grpc_closure* closure,
 }
 
 void ExecCtx::RunList(const DebugLocation& location, grpc_closure_list* list) {
-  grpc_closure_list* destlist = grpc_core::ExecCtx::Get()->closure_list();
+  grpc_closure_list* destlist = ExecCtx::Get()->closure_list();
 
   if (list->head != nullptr) {
     if (destlist->head == nullptr) {
