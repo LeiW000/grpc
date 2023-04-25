@@ -31,7 +31,7 @@ then
   # optimizations that can have huge impact on secure channel throughput.
   mkdir -p cmake/build
   cd cmake/build
-  cmake -DgRPC_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release ../..
+  cmake -DgRPC_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo ../..
   make qps_worker qps_json_driver -j8
   cd ../..
   # unbreak subsequent make builds by restoring zconf.h (previously renamed by cmake build)
