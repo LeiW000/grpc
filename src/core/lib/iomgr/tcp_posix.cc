@@ -36,6 +36,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <liburing.h>
 
 #include <algorithm>
 #include <unordered_map>
@@ -546,6 +547,7 @@ struct grpc_tcp {
   int min_progress_size;  // A hint from upper layers specifying the minimum
                           // number of bytes that need to be read to make
                           // meaningful progress
+  struct io_uring iouring;
 };
 
 struct backup_poller {
@@ -1121,6 +1123,7 @@ static void tcp_handle_read(void* arg /* grpc_tcp */, grpc_error_handle error) {
 
 static void tcp_read(grpc_endpoint* ep, grpc_slice_buffer* incoming_buffer,
                      grpc_closure* cb, bool urgent, int min_progress_size) {
+    
   grpc_tcp* tcp = reinterpret_cast<grpc_tcp*>(ep);
   GPR_ASSERT(tcp->read_cb == nullptr);
   tcp->read_cb = cb;
@@ -1626,6 +1629,11 @@ static void UnrefMaybePutZerocopySendRecord(grpc_tcp* tcp,
   }
 }
 
+struct iouring_request {
+    int event_type;
+    int client_socket;
+};
+
 static bool tcp_flush_zerocopy(grpc_tcp* tcp, TcpZerocopySendRecord* record,
                                grpc_error_handle* error) {
   bool done = do_tcp_flush_zerocopy(tcp, record, error);
@@ -1698,7 +1706,29 @@ static bool tcp_flush(grpc_tcp* tcp, grpc_error_handle* error) {
       grpc_core::global_stats().IncrementTcpWriteSize(sending_length);
       grpc_core::global_stats().IncrementTcpWriteIovSize(iov_size);
 
-      sent_length = tcp_send(tcp->fd, &msg, &saved_errno);
+      //      sent_length = tcp_send(tcp->fd, &msg, &saved_errno);
+      gpr_log(GPR_INFO, "IO_uring: Tcp_send()------------Here is the point.");
+      struct iouring_request req;
+      struct io_uring_sqe *sqe = io_uring_get_sqe(&tcp->iouring);
+      req.event_type = 0x7;
+      req.client_socket = tcp->fd;
+      io_uring_prep_writev(sqe, tcp->fd, iov, iov_size, 0);
+      io_uring_sqe_set_data(sqe, &req);
+      io_uring_submit(&tcp->iouring);
+
+      struct io_uring_cqe *cqe;
+      int ret = io_uring_wait_cqe(&tcp->iouring, &cqe);
+      struct iouring_request *res = (struct iouring_request*) cqe->user_data;
+      if (ret < 0)
+	gpr_log(GPR_INFO, "Failure of io_uring_wait_cqe()!");
+      if (cqe->res < 0) {
+	gpr_log(GPR_INFO, "Async request failed: %s for event: %d\n",
+		strerror(-cqe->res), res->event_type);
+      }
+      gpr_log(GPR_INFO, "IO_uring: Sent %d data, sending_length: %d\n", cqe->res, sending_length);
+      io_uring_cqe_seen(&tcp->iouring, cqe);
+      
+      sent_length = cqe->res;
     }
 
     if (sent_length < 0) {
@@ -1915,6 +1945,7 @@ static const grpc_endpoint_vtable vtable = {tcp_read,
 grpc_endpoint* grpc_tcp_create(grpc_fd* em_fd,
                                const grpc_core::PosixTcpOptions& options,
                                absl::string_view peer_string) {
+  
   grpc_tcp* tcp = new grpc_tcp(options);
   tcp->base.vtable = &vtable;
   tcp->peer_string = std::string(peer_string);
@@ -2004,6 +2035,11 @@ grpc_endpoint* grpc_tcp_create(grpc_fd* em_fd,
                       grpc_schedule_on_exec_ctx);
     grpc_fd_notify_on_error(tcp->em_fd, &tcp->error_closure);
   }
+
+  if (io_uring_queue_init(256, &tcp->iouring, 0) == 0)
+    gpr_log(GPR_INFO, "Called io_uring_queue_init() successfully.");
+  else
+    gpr_log(GPR_INFO, "Failled to io_uring_queue_init().");
 
   return &tcp->base;
 }
