@@ -469,6 +469,10 @@ using grpc_core::TcpZerocopySendCtx;
 using grpc_core::TcpZerocopySendRecord;
 
 namespace {
+struct iouring_request {
+    int event_type;
+    int client_socket;
+};
 
 struct grpc_tcp {
   explicit grpc_tcp(const grpc_core::PosixTcpOptions& tcp_options)
@@ -922,11 +926,38 @@ static bool tcp_do_read(grpc_tcp* tcp, grpc_error_handle* error)
     grpc_core::global_stats().IncrementTcpReadOfferIovSize(
         tcp->incoming_buffer->count);
 
-    do {
-      grpc_core::global_stats().IncrementSyscallRead();
-      read_bytes = recvmsg(tcp->fd, &msg, 0);
-    } while (read_bytes < 0 && errno == EINTR);
+    // do {
+    //   grpc_core::global_stats().IncrementSyscallRead();
+    //   read_bytes = recvmsg(tcp->fd, &msg, 0);
+    // } while (read_bytes < 0 && errno == EINTR);
 
+    // gpr_log(GPR_INFO, "IO_uring Read: Read %d data, errno: %d, inq_capable: %d %d.\n", read_bytes, errno, tcp->inq_capable, GRPC_HAVE_TCP_INQ);
+    
+    // IO_uring read POC codes
+    struct iouring_request req;
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&tcp->iouring);
+    req.event_type = 0x9; 	// read operation
+    req.client_socket = tcp->fd;
+    io_uring_prep_readv(sqe, tcp->fd, iov, iov_len, 0);
+    io_uring_sqe_set_data(sqe, &req);
+    io_uring_submit(&tcp->iouring);
+
+    struct io_uring_cqe *cqe;
+    int ret = io_uring_wait_cqe(&tcp->iouring, &cqe);
+    struct iouring_request *res = (struct iouring_request*) cqe->user_data;
+    if (ret < 0)
+      gpr_log(GPR_INFO, "IO_uring Read: Failure of io_uring_wait_cqe()!");
+    if (cqe->res < 0) {
+      gpr_log(GPR_INFO, "IO_uring Read: Async request failed: %s for event: %d\n",
+    	      strerror(-cqe->res), res->event_type);
+    }
+    gpr_log(GPR_INFO, "IO_uring Read: Read %d data, GRPC_HAVE_TCP_INQ: %d.\n", cqe->res, GRPC_HAVE_TCP_INQ);
+    io_uring_cqe_seen(&tcp->iouring, cqe);
+      
+    read_bytes = cqe->res;
+    
+    // End of IO_uring POC codes
+    
     if (read_bytes < 0 && errno == EAGAIN) {
       // NB: After calling call_read_cb a parallel call of the read handler may
       // be running.
@@ -975,8 +1006,10 @@ static bool tcp_do_read(grpc_tcp* tcp, grpc_error_handle* error)
           break;
         }
       }
+      tcp->inq = 0;		// This is very important.
     }
 #endif  // GRPC_HAVE_TCP_INQ
+
 
     total_read_bytes += read_bytes;
     if (tcp->inq == 0 || total_read_bytes == tcp->incoming_buffer->length) {
@@ -1629,10 +1662,6 @@ static void UnrefMaybePutZerocopySendRecord(grpc_tcp* tcp,
   }
 }
 
-struct iouring_request {
-    int event_type;
-    int client_socket;
-};
 
 static bool tcp_flush_zerocopy(grpc_tcp* tcp, TcpZerocopySendRecord* record,
                                grpc_error_handle* error) {
