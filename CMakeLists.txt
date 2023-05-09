@@ -1664,7 +1664,6 @@ target_link_libraries(gpr
   absl::time
   absl::optional
   absl::variant
-  uring
 )
 if(_gRPC_PLATFORM_ANDROID)
   target_link_libraries(gpr
