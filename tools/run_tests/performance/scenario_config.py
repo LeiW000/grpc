@@ -40,7 +40,12 @@ HISTOGRAM_PARAMS = {
 # target number of RPCs outstanding on across all client channels in
 # non-ping-pong tests (since we can only specify per-channel numbers, the
 # actual target will be slightly higher)
-OUTSTANDING_REQUESTS = {'async': 6400, 'async-limited': 800, 'sync': 1000, 'callback': 6400}
+OUTSTANDING_REQUESTS = {
+    'async': 6400,
+    'async-limited': 800,
+    'sync': 1000,
+    'callback': 6400
+}
 
 # wide is the number of client channels in multi-channel tests (1 otherwise)
 WIDE = 64
